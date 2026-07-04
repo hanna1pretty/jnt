@@ -3,17 +3,15 @@ import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
-API_KEY = os.getenv("BINDERBYTE_API_KEY")
+DEFAULT_API_KEY = os.getenv("BINDERBYTE_API_KEY")
 BASE_URL = "https://api.binderbyte.com/v1/track"
 
-async def cek_resi(courier: str, resi: str):
-    """
-    Mengembalikan dict: {"success": bool, "status": str, "history": list, "raw": dict}
-    """
-    if not API_KEY:
-        return {"success": False, "status": "BINDERBYTE_API_KEY belum diisi di .env", "history": [], "raw": {}}
+async def cek_resi(courier: str, resi: str, api_key: str = None):
+    key = api_key or DEFAULT_API_KEY
+    if not key:
+        return {"success": False, "status": "API key belum diatur", "history": [], "raw": {}}
 
-    params = {"api_key": API_KEY, "courier": courier.lower(), "awb": resi}
+    params = {"api_key": key, "courier": courier.lower(), "awb": resi}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
