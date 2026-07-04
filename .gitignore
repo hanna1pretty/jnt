@@ -1,0 +1,6 @@
+.env
+resi.db
+__pycache__/
+*.pyc
+venv/
+log.txt
