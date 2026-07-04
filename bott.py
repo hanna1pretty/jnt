@@ -1,14 +1,17 @@
 import os
 import re
+import time
+import platform
 import logging
 import asyncio
+import psutil
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from database import init_db, add_resi, remove_resi, get_all_resi, update_status, set_config, get_config
-from binderbyte_api import cek_resi
-from geocode import geocode_city
+from binderbyte_api import cek_resi, format_history
+from geocode import geocode_city, resolve_hub_code
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -17,12 +20,14 @@ OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-KURIR_VALID = ["jne", "pos", "jnt", "sicepat", "tiki", "anteraja", "wahana", "ninja", "lion"]
+KURIR_VALID = ["jne", "pos", "tiki", "sicepat", "anteraja", "lion", "ninja", "sap", "ide", "jnt", "wahana", "spx"]
 CEK_INTERVAL_DETIK = 3 * 3600
 MAX_PARALEL = 5
 
 CITY_PATTERN = re.compile(r"\[([A-Z\s,]+)\]|di\s+([A-Za-z\s]+)$")
 FRAME_LOADING = ["🔍 Mengecek", "🔍 Mengecek.", "🔍 Mengecek..", "🔍 Mengecek..."]
+
+BOT_START_TIME = time.time()
 
 
 def extract_city(status_text: str):
@@ -48,13 +53,26 @@ def main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("📋 Paket Saya", callback_data="status"),
          InlineKeyboardButton("🚚 Kurir Didukung", callback_data="kurir")],
-        [InlineKeyboardButton("❓ Bantuan Lengkap", callback_data="help")],
+        [InlineKeyboardButton("🏓 Ping Bot", callback_data="ping"),
+         InlineKeyboardButton("❓ Bantuan Lengkap", callback_data="help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
+def format_uptime(seconds: float) -> str:
+    seconds = int(seconds)
+    hari, sisa = divmod(seconds, 86400)
+    jam, sisa = divmod(sisa, 3600)
+    menit, detik = divmod(sisa, 60)
+    parts = []
+    if hari: parts.append(f"{hari}h")
+    if jam: parts.append(f"{jam}j")
+    if menit: parts.append(f"{menit}m")
+    parts.append(f"{detik}d")
+    return " ".join(parts)
+
+
 async def animasi_loading(message):
-    """Kirim pesan awal lalu animasikan titik-titik selama proses berjalan."""
     msg = await message.reply_text(FRAME_LOADING[0])
 
     async def animate():
@@ -82,6 +100,25 @@ async def selesai_animasi(msg, task, teks_akhir):
     await msg.edit_text(teks_akhir, parse_mode="Markdown")
 
 
+def teks_help():
+    return (
+        "📦 *Bot Cek Resi — Panduan*\n\n"
+        "/track `<kurir>` `<resi>` `[label]` — mulai pantau paket\n"
+        "   contoh: `/track jnt JY1007603351 Sepatu`\n"
+        "   contoh SPX: `/track spx SPXID048949914625 Baju`\n\n"
+        "/status — lihat semua paket yang dipantau\n"
+        "/cek `<kurir>` `<resi>` — cek sekali tanpa disimpan\n"
+        "/untrack `<resi>` — berhenti memantau\n"
+        "/map `<resi>` — kirim titik lokasi checkpoint terakhir\n"
+        "/kurir — daftar kode kurir yang didukung\n"
+        "/ping — cek respons bot & kondisi server\n"
+        "/setapikey `<key>` — ganti API key BinderByte (khusus owner)\n"
+        "/help — tampilkan pesan ini\n\n"
+        "✅ SPX (Shopee Express) kini sudah didukung otomatis!\n"
+        f"🔄 Bot otomatis cek ulang tiap {CEK_INTERVAL_DETIK // 3600} jam dan kirim notifikasi kalau status berubah."
+    )
+
+
 # ---------- Command handlers ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,23 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    teks = teks_help()
-    await update.message.reply_text(teks, parse_mode="Markdown", reply_markup=main_menu_keyboard())
-
-def teks_help():
-    return (
-        "📦 *Bot Cek Resi — Panduan*\n\n"
-        "/track `<kurir>` `<resi>` `[label]` — mulai pantau paket\n"
-        "   contoh: `/track jnt JP6961181926 Sepatu`\n\n"
-        "/status — lihat semua paket yang dipantau\n"
-        "/cek `<kurir>` `<resi>` — cek sekali tanpa disimpan\n"
-        "/untrack `<resi>` — berhenti memantau\n"
-        "/map `<resi>` — kirim titik lokasi checkpoint terakhir\n"
-        "/kurir — daftar kode kurir yang didukung\n"
-        "/help — tampilkan pesan ini\n\n"
-        "⚠️ SPX (Shopee Express) belum didukung otomatis — cek manual di spx.co.id.\n"
-        f"🔄 Bot otomatis cek ulang tiap {CEK_INTERVAL_DETIK // 3600} jam dan kirim notifikasi kalau status berubah."
-    )
+    await update.message.reply_text(teks_help(), parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 async def kurir_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚚 Kurir yang didukung:\n" + ", ".join(k.upper() for k in KURIR_VALID))
@@ -126,7 +147,7 @@ async def setapikey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_key = args[0]
     set_config("binderbyte_api_key", new_key)
     try:
-        await update.message.delete()  # hapus pesan berisi key demi keamanan
+        await update.message.delete()
     except Exception:
         pass
     await context.bot.send_message(
@@ -143,9 +164,6 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     courier, resi = args[0].lower(), args[1]
     label = " ".join(args[2:]) if len(args) > 2 else None
 
-    if courier == "spx":
-        await update.message.reply_text("⚠️ SPX belum didukung otomatis. Cek manual di https://spx.co.id")
-        return
     if courier not in KURIR_VALID:
         await update.message.reply_text(f"Kurir '{courier}' tidak dikenali. Ketik /kurir.")
         return
@@ -161,12 +179,20 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await selesai_animasi(msg, task, "⚠️ Resi ini sudah dipantau.")
         return
 
-    await selesai_animasi(
-        msg, task,
+    d = hasil["detail"]
+    teks_riwayat = format_history(hasil["history"])
+    teks = (
         f"✅ *Berhasil ditambahkan!*\n\n"
-        f"Kurir: {courier.upper()}\nResi: `{resi}`\n"
-        f"Label: {label or '-'}\nStatus: {hasil['status']}"
+        f"📦 Kurir: {d['courier_name']} ({d['service'] or '-'})\n"
+        f"Resi: `{resi}`\n"
+        f"Label: {label or '-'}\n"
+        f"Berat: {d['weight']} gram\n\n"
+        f"📍 *Status saat ini:* {hasil['status']}\n"
+        f"_{d['last_desc']}_\n"
+        f"Update terakhir: {d['last_date']}\n\n"
+        f"🧾 *Riwayat perjalanan:*\n{teks_riwayat}"
     )
+    await selesai_animasi(msg, task, teks)
 
 async def cek_sekali(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -174,9 +200,28 @@ async def cek_sekali(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Format: /cek <kurir> <resi>")
         return
     courier, resi = args[0].lower(), args[1]
+
+    if courier not in KURIR_VALID:
+        await update.message.reply_text(f"Kurir '{courier}' tidak dikenali. Ketik /kurir.")
+        return
+
     msg, task = await animasi_loading(update.message)
     hasil = await cek_resi(courier, resi, api_key=get_active_api_key())
-    teks = f"📦 {hasil['status']}" if hasil["success"] else f"❌ {hasil['status']}"
+
+    if not hasil["success"]:
+        await selesai_animasi(msg, task, f"❌ {hasil['status']}")
+        return
+
+    d = hasil["detail"]
+    teks_riwayat = format_history(hasil["history"])
+    teks = (
+        f"📦 Kurir: {d['courier_name']} ({d['service'] or '-'})\n"
+        f"Resi: `{resi}`\n\n"
+        f"📍 *Status:* {hasil['status']}\n"
+        f"_{d['last_desc']}_\n"
+        f"Update terakhir: {d['last_date']}\n\n"
+        f"🧾 *Riwayat:*\n{teks_riwayat}"
+    )
     await selesai_animasi(msg, task, teks)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,9 +254,12 @@ async def map_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Resi tidak ditemukan di daftar pantauan.")
         return
     _, _, courier, resi, label, last_status = match
-    city = extract_city(last_status)
+
+    city = resolve_hub_code(last_status) or extract_city(last_status)
     if not city:
-        await update.message.reply_text(f"Status: {last_status}\n(Tidak bisa deteksi nama kota untuk map)")
+        await update.message.reply_text(
+            f"Status: {last_status}\n(Kode hub belum ada di mapping — tambahkan manual di geocode.py)"
+        )
         return
     coords = await asyncio.to_thread(geocode_city, city)
     if not coords:
@@ -220,6 +268,28 @@ async def map_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lat, lon = coords
     await update.message.reply_location(latitude=lat, longitude=lon)
     await update.message.reply_text(f"📍 Perkiraan lokasi checkpoint terakhir: {city}\nStatus: {last_status}")
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t0 = time.perf_counter()
+    msg = await update.message.reply_text("🏓 Menghitung ping...")
+    latency_ms = (time.perf_counter() - t0) * 1000
+
+    cpu = psutil.cpu_percent(interval=0.5)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    uptime = format_uptime(time.time() - BOT_START_TIME)
+
+    teks = (
+        f"🏓 *Pong!*\n\n"
+        f"⚡ Latensi bot: `{latency_ms:.0f} ms`\n"
+        f"⏱️ Uptime bot: `{uptime}`\n\n"
+        f"🖥️ *Kondisi Server*\n"
+        f"CPU: `{cpu:.1f}%`\n"
+        f"RAM: `{ram.percent:.1f}%` ({ram.used // (1024**2)}MB / {ram.total // (1024**2)}MB)\n"
+        f"Disk: `{disk.percent:.1f}%` ({disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB)\n"
+        f"OS: `{platform.system()} {platform.release()}`"
+    )
+    await msg.edit_text(teks, parse_mode="Markdown")
 
 
 # ---------- Inline button callback ----------
@@ -244,8 +314,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "help":
         await query.message.reply_text(teks_help(), parse_mode="Markdown")
 
+    elif query.data == "ping":
+        cpu = psutil.cpu_percent(interval=0.5)
+        ram = psutil.virtual_memory()
+        uptime = format_uptime(time.time() - BOT_START_TIME)
+        teks = (
+            f"🏓 *Pong!*\n\n"
+            f"⏱️ Uptime: `{uptime}`\n"
+            f"CPU: `{cpu:.1f}%` | RAM: `{ram.percent:.1f}%`"
+        )
+        await query.message.reply_text(teks, parse_mode="Markdown")
 
-# ---------- Job berkala ----------
+
+# ---------- Job berkala (paralel + dibatasi semaphore) ----------
 
 async def cek_berkala(context: ContextTypes.DEFAULT_TYPE):
     rows = get_all_resi()
@@ -290,6 +371,7 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("untrack", untrack))
     app.add_handler(CommandHandler("map", map_location))
+    app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("setapikey", setapikey))
     app.add_handler(CallbackQueryHandler(button_callback))
 
