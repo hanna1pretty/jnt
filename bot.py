@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import random
 import platform
 import logging
 import asyncio
@@ -21,13 +22,32 @@ OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+BOT_NAME = "Okta Resi Tracker"
+
 KURIR_VALID = ["jne", "pos", "tiki", "sicepat", "anteraja", "lion", "ninja", "sap", "ide", "jnt", "wahana", "spx"]
+
+KURIR_INFO = {
+    "jne":      {"nama": "JNE Express",     "contoh": "TJE1552766682341"},
+    "pos":      {"nama": "POS Indonesia",   "contoh": "P2107150095165"},
+    "tiki":     {"nama": "TIKI",            "contoh": "Format bervariasi, cek di struk"},
+    "sicepat":  {"nama": "SiCepat",         "contoh": "002564893621"},
+    "anteraja": {"nama": "AnterAja",        "contoh": "10001757556314"},
+    "lion":     {"nama": "Lion Parcel",     "contoh": "B1LZZJUH"},
+    "ninja":    {"nama": "Ninja Xpress",    "contoh": "NLIDAP1198604122"},
+    "sap":      {"nama": "SAP Express",     "contoh": "TGR1100067556864"},
+    "ide":      {"nama": "ID Express",      "contoh": "IDD150963332202"},
+    "jnt":      {"nama": "J&T Express",     "contoh": "JY1007603351"},
+    "wahana":   {"nama": "Wahana",          "contoh": "LN2U66CX"},
+    "spx":      {"nama": "Shopee Express",  "contoh": "SPXID048949914625"},
+}
+
 CEK_INTERVAL_DETIK = 3 * 3600
 MAX_PARALEL = 5
 
 BOT_START_TIME = time.time()
 
 BULAN_ID = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
 FRAME_SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 FRAME_TEXTS = [
@@ -39,6 +59,16 @@ FRAME_TEXTS = [
     "▓▓▓▓▓▓▓▓▓▓ 100% Selesai.",
 ]
 
+QUOTES_HARIAN = [
+    "Hidup itu seperti roda, kadang di atas kadang di bawah.",
+    "Rezeki tidak akan tertukar, yang penting terus berusaha.",
+    "Paket boleh telat, tapi jangan sampai semangat ikut telat.",
+    "Sabar menunggu paket adalah bentuk latihan kesabaran hidup.",
+    "Setiap kiriman punya waktunya sendiri, begitu juga rezekimu.",
+]
+
+
+# ---------- Util format ----------
 
 def format_tanggal_wib(date_str: str) -> str:
     try:
@@ -55,7 +85,7 @@ def format_history_wib(history: list, max_items: int = 5) -> str:
     for item in history[:max_items]:
         tanggal = format_tanggal_wib(item.get("date", "-"))
         desc = item.get("desc", "-")
-        lines.append(f"🕐 {tanggal}\n   {desc}")
+        lines.append(f"{tanggal}\n{desc}")
     sisa = len(history) - max_items
     teks = "\n\n".join(lines)
     if sisa > 0:
@@ -69,10 +99,10 @@ def format_uptime(seconds: float) -> str:
     jam, sisa = divmod(sisa, 3600)
     menit, detik = divmod(sisa, 60)
     parts = []
-    if hari: parts.append(f"{hari}h")
-    if jam: parts.append(f"{jam}j")
+    if hari: parts.append(f"{hari}d")
+    if jam: parts.append(f"{jam}h")
     if menit: parts.append(f"{menit}m")
-    parts.append(f"{detik}d")
+    parts.append(f"{detik}s")
     return " ".join(parts)
 
 
@@ -86,32 +116,104 @@ def is_owner(update: Update) -> bool:
     return str(update.effective_chat.id) == str(OWNER_CHAT_ID)
 
 
+def nama_tampilan(update: Update) -> str:
+    user = update.effective_user
+    if not user:
+        return "Kamu"
+    if user.first_name:
+        nama = user.first_name
+        if user.last_name:
+            nama += f" {user.last_name}"
+        return nama
+    if user.username:
+        return f"@{user.username}"
+    return "Kamu"
+
+
+def escape_md2(teks) -> str:
+    """Escape karakter khusus MarkdownV2 pada teks dinamis. Hanya dipakai di pesan /start."""
+    karakter_khusus = r"_*[]()~`>#+-=|{}.!"
+    hasil = str(teks)
+    for ch in karakter_khusus:
+        hasil = hasil.replace(ch, f"\\{ch}")
+    return hasil
+
+
+def sapaan_wib() -> str:
+    jam = datetime.now().hour
+    if 5 <= jam < 11:
+        return "Selamat Pagi"
+    elif 11 <= jam < 15:
+        return "Selamat Siang"
+    elif 15 <= jam < 18:
+        return "Selamat Sore"
+    else:
+        return "Selamat Malam"
+
+
+# ---------- Keyboard ----------
+
 def main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📦 Paket Saya", callback_data="status", style="primary"),
-         InlineKeyboardButton("🚚 Kurir Didukung", callback_data="kurir", style="primary")],
-        [InlineKeyboardButton("📖 Panduan Lengkap", callback_data="help", style="primary")],
+        [InlineKeyboardButton("Paket Saya", callback_data="status", style="primary"),
+         InlineKeyboardButton("Berhenti Pantau", callback_data="stop_menu", style="danger")],
+        [InlineKeyboardButton("Kurir Didukung", callback_data="kurir", style="success"),
+         InlineKeyboardButton("Panduan", callback_data="help_menu", style="primary")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def hasil_keyboard(resi: str, courier: str):
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh Status", callback_data=f"refresh:{courier}:{resi}", style="primary"),
-         InlineKeyboardButton("📍 Lihat Peta", callback_data=f"map:{resi}", style="success")],
-        [InlineKeyboardButton("🗑️ Berhenti Pantau", callback_data=f"untrack:{resi}", style="danger")],
-        [InlineKeyboardButton("⬅️ Menu Utama", callback_data="menu", style="primary")],
+        [InlineKeyboardButton("Refresh Status", callback_data=f"refresh:{courier}:{resi}", style="primary"),
+         InlineKeyboardButton("Lihat Peta", callback_data=f"map:{resi}", style="success")],
+        [InlineKeyboardButton("Berhenti Pantau", callback_data=f"untrack:{resi}", style="danger")],
+        [InlineKeyboardButton("Menu Utama", callback_data="menu", style="primary")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def status_list_keyboard():
+def status_list_keyboard(hasil_semua):
+    keyboard = []
+    for resi, label, hasil in hasil_semua:
+        if hasil.get("success") and "DELIVERED" in (hasil.get("status") or "").upper():
+            teks_tombol = f"Hapus: {label or resi}"
+            if len(teks_tombol) > 40:
+                teks_tombol = teks_tombol[:37] + "..."
+            keyboard.append([InlineKeyboardButton(teks_tombol, callback_data=f"delpkg:{resi}", style="danger")])
+    keyboard.append([InlineKeyboardButton("Refresh Semua", callback_data="status", style="primary")])
+    keyboard.append([InlineKeyboardButton("Menu Utama", callback_data="menu", style="success")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def stop_menu_keyboard(rows):
+    keyboard = []
+    for _, _, courier, resi, label, last_status in rows:
+        teks_tombol = f"{label or resi} ({courier.upper()})"
+        if len(teks_tombol) > 40:
+            teks_tombol = teks_tombol[:37] + "..."
+        keyboard.append([InlineKeyboardButton(teks_tombol, callback_data=f"confirm_untrack:{resi}", style="danger")])
+    keyboard.append([InlineKeyboardButton("Batal", callback_data="menu", style="primary")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def help_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh Semua", callback_data="status", style="primary")],
-        [InlineKeyboardButton("⬅️ Menu Utama", callback_data="menu", style="primary")],
+        [InlineKeyboardButton("Melacak Paket", callback_data="help_track", style="primary"),
+         InlineKeyboardButton("Cek Sekali", callback_data="help_cek", style="primary")],
+        [InlineKeyboardButton("Lihat Peta", callback_data="help_map", style="success"),
+         InlineKeyboardButton("Berhenti Pantau", callback_data="help_untrack", style="danger")],
+        [InlineKeyboardButton("Daftar Kurir", callback_data="kurir", style="success")],
+        [InlineKeyboardButton("Menu Utama", callback_data="menu", style="primary")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
+def kembali_help_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Kembali ke Panduan", callback_data="help_menu", style="primary")]])
+
+
+# ---------- Animasi loading ----------
 
 async def animasi_loading(message):
     msg = await message.reply_text(f"{FRAME_SPINNER[0]} {FRAME_TEXTS[0]}")
@@ -163,6 +265,8 @@ def status_emoji(status_text: str) -> str:
     return "📦"
 
 
+# ---------- Teks builder (format Markdown biasa — TIDAK dimigrasi ke MarkdownV2) ----------
+
 def buat_kartu_hasil(resi: str, label: str, hasil: dict, disimpan: bool) -> str:
     d = hasil["detail"]
     emoji = status_emoji(hasil["status"])
@@ -191,8 +295,23 @@ def buat_kartu_hasil(resi: str, label: str, hasil: dict, disimpan: bool) -> str:
     return kartu
 
 
+def teks_error_resi(courier: str, resi: str, pesan_api: str) -> str:
+    return (
+        "❌ *Resi tidak dapat diproses*\n\n"
+        f"Kurir: `{courier.upper()}`\n"
+        f"Nomor resi: `{resi}`\n\n"
+        f"_{pesan_api}_\n\n"
+        "*Kemungkinan penyebab:*\n"
+        "1. Nomor resi salah ketik atau tidak lengkap\n"
+        "2. Kode kurir yang dipilih tidak sesuai dengan resi ini\n"
+        "3. Data belum tersedia di sistem kurir karena paket baru saja dibuat\n"
+        "4. Resi sudah lama dan terhapus dari sistem tracking kurir\n\n"
+        "Periksa kembali nomor resi dan kode kurir, lalu coba lagi. "
+        "Ketik `/kurir` untuk melihat daftar kode kurir dan contoh formatnya."
+    )
+
+
 def buat_blok_ringkas(resi: str, label: str, hasil: dict) -> str:
-    """Blok detail per paket untuk ditampilkan di daftar /status — lebih lengkap dari sekadar status."""
     if not hasil["success"]:
         return f"⚠️ *{label or resi}*\n`{resi}`\n_Gagal cek: {hasil['status']}_"
 
@@ -207,47 +326,80 @@ def buat_blok_ringkas(resi: str, label: str, hasil: dict) -> str:
     blok += f" · `{resi}`\n"
     blok += f"*Status:* {hasil['status']}\n"
     blok += f"_{d['last_desc']}_\n"
-    blok += f"🕐 `{tanggal_terakhir}`"
+    blok += f"`{tanggal_terakhir}`"
     return blok
 
 
-def teks_help():
-    return (
-        "*Panduan Resi Tracker Bot*\n\n"
-        "`/track <kurir> <resi> [label]`\n"
-        "_Mulai pantau paket otomatis_\n"
-        "Contoh: `/track jnt JY1007603351 Sepatu`\n"
-        "Contoh SPX: `/track spx SPXID048949914625 Baju`\n\n"
-        "`/status` — lihat semua paket yang dipantau (real-time)\n"
-        "`/cek <kurir> <resi>` — cek sekali tanpa disimpan\n"
-        "`/untrack <resi>` — berhenti memantau\n"
-        "`/map <resi>` — lokasi checkpoint terakhir\n"
-        "`/kurir` — daftar kode kurir yang didukung\n"
-        "`/ping` — cek respons bot & kondisi server\n"
-        "`/setapikey <key>` — ganti API key _(khusus owner)_\n\n"
-        "SPX (Shopee Express) sudah didukung otomatis.\n"
-        f"Bot auto-cek tiap {CEK_INTERVAL_DETIK // 3600} jam dan kirim notifikasi bila status berubah.\n"
-        "Semua waktu ditampilkan dalam WIB."
-    )
-
-
 def teks_kurir() -> str:
-    return "*Kurir yang didukung*\n\n" + ", ".join(f"`{k.upper()}`" for k in KURIR_VALID)
+    teks = "*Kurir yang didukung*\n\n"
+    blok = []
+    for k in KURIR_VALID:
+        info = KURIR_INFO.get(k, {})
+        nama = info.get("nama", k.upper())
+        contoh = info.get("contoh", "Format bervariasi")
+        blok.append(f"`{k}` — {nama}\nContoh resi: `{contoh}`")
+    teks += "\n\n".join(blok)
+    return teks
 
 
-def teks_start() -> str:
+def teks_help_menu() -> str:
     return (
-        "📦 *Resi Tracker Bot*\n\n"
-        "Pantau semua paketmu tanpa perlu buka aplikasi marketplace.\n"
-        "Pilih menu di bawah atau ketik /help untuk panduan lengkap."
+        f"*Panduan {BOT_NAME}*\n\n"
+        "Pilih topik di bawah untuk melihat cara pakainya, atau ketik langsung "
+        "perintah yang kamu tahu."
     )
 
 
-async def bangun_teks_status_detail(chat_id: int) -> str:
-    """Cek ulang SEMUA resi milik user langsung ke API (paralel), tampilkan detail lengkap per paket."""
+def teks_help_track() -> str:
+    return (
+        "*Melacak Paket Baru*\n\n"
+        "`/track <kurir> <resi> [label]`\n\n"
+        "Mendaftarkan paket untuk dipantau otomatis. Bot akan mengecek statusnya "
+        "secara berkala setiap beberapa jam, dan mengirim notifikasi setiap ada "
+        "perubahan status — mulai dari diproses, dalam perjalanan, hingga diterima.\n\n"
+        "Contoh:\n`/track jnt JY1007603351 Sepatu`\n`/track spx SPXID048949914625 Baju`"
+    )
+
+
+def teks_help_cek() -> str:
+    return (
+        "*Cek Sekali Tanpa Simpan*\n\n"
+        "`/cek <kurir> <resi>`\n\n"
+        "Mengecek status paket satu kali saja tanpa menambahkannya ke daftar "
+        "pantauan. Cocok kalau kamu cuma penasaran status sekarang, tanpa perlu "
+        "notifikasi lanjutan.\n\n"
+        "Contoh:\n`/cek jne TJE1552766682341`"
+    )
+
+
+def teks_help_map() -> str:
+    return (
+        "*Lihat Lokasi Checkpoint*\n\n"
+        "`/map <resi>`\n\n"
+        "Mengirimkan perkiraan titik lokasi checkpoint terakhir paket di peta, "
+        "berdasarkan kode hub yang tercatat dalam riwayat pengiriman. Fitur ini "
+        "hanya bekerja untuk kode hub yang sudah dikenali sistem — kalau belum "
+        "dikenali, bot akan memberitahu apa adanya daripada menampilkan lokasi "
+        "yang salah."
+    )
+
+
+def teks_help_untrack() -> str:
+    return (
+        "*Berhenti Memantau Paket*\n\n"
+        "Ada dua cara:\n\n"
+        "1. Ketik `/untrack <resi>` langsung\n"
+        "2. Tekan tombol *Berhenti Pantau* di menu utama, lalu pilih paket mana "
+        "yang mau dihentikan dari daftar tombol yang muncul — tidak perlu mengetik "
+        "nomor resi secara manual."
+    )
+
+
+async def bangun_status_detail(chat_id: int):
     rows = get_all_resi(chat_id)
     if not rows:
-        return "Belum ada paket dipantau.\nPakai `/track <kurir> <resi>` untuk mulai."
+        teks = "Belum ada paket dipantau.\nPakai `/track <kurir> <resi>` untuk mulai."
+        return teks, []
 
     semaphore = asyncio.Semaphore(MAX_PARALEL)
     api_key = get_active_api_key()
@@ -265,16 +417,55 @@ async def bangun_teks_status_detail(chat_id: int) -> str:
     teks = f"*Daftar paket dipantau* _({len(rows)} paket)_\n\n"
     blok_list = [buat_blok_ringkas(resi, label, hasil) for resi, label, hasil in hasil_semua]
     teks += "\n\n───\n\n".join(blok_list)
+    return teks, hasil_semua
+
+
+# ---------- Teks /start (MarkdownV2, terisolasi dari bagian lain) ----------
+
+def teks_start_v2(update: Update) -> str:
+    user = update.effective_user
+    nama = nama_tampilan(update)
+    username = f"@{user.username}" if user and user.username else "\\-"
+    user_id = user.id if user else "-"
+
+    waktu_now = datetime.now()
+    hari_id = HARI_ID[waktu_now.weekday()]
+    waktu_str = f"{hari_id}, {waktu_now.day:02d} {BULAN_ID[waktu_now.month - 1]} {waktu_now.year} \\- {waktu_now.strftime('%H:%M:%S')} WIB"
+    uptime_str = format_uptime(time.time() - BOT_START_TIME)
+
+    jumlah_paket = len(get_all_resi(update.effective_chat.id))
+    quote = random.choice(QUOTES_HARIAN)
+
+    garis = "➖" * 14
+
+    teks = (
+        f"{sapaan_wib()}\\! ☀️\n"
+        f"🕒 Waktu: `{waktu_str}`\n"
+        f"⏳ Bot Uptime: `{escape_md2(uptime_str)}`\n"
+        f"{garis}\n"
+        f"Halo {escape_md2(username)} 👋\n"
+        f"❏ Nama: *{escape_md2(nama)}*\n"
+        f"├ 👤 User ID: `{user_id}`\n"
+        f"{garis}\n"
+        f"├ 📦 Paket Dipantau: `{jumlah_paket}`\n"
+        f"{garis}\n"
+        f">{escape_md2(quote)}\n"
+        f"{garis}\n"
+        f"Ini *{escape_md2(BOT_NAME)}* — asisten pemantau paket dari server kurir, tanpa perlu buka aplikasi marketplace\\.\n\n"
+        f"Pilih menu di bawah untuk mulai\\."
+    )
     return teks
 
 
 # ---------- Command handlers ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(teks_start(), parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await update.message.reply_text(
+        teks_start_v2(update), parse_mode="MarkdownV2", reply_markup=main_menu_keyboard()
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(teks_help(), parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await update.message.reply_text(teks_help_menu(), parse_mode="Markdown", reply_markup=help_menu_keyboard())
 
 async def kurir_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(teks_kurir(), parse_mode="Markdown")
@@ -315,7 +506,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hasil = await cek_resi(courier, resi, api_key=get_active_api_key())
 
     if not hasil["success"]:
-        await selesai_animasi(msg, task, f"Gagal: {hasil['status']}")
+        await selesai_animasi(msg, task, teks_error_resi(courier, resi, hasil["status"]))
         return
 
     if not add_resi(update.effective_chat.id, courier, resi, label):
@@ -340,7 +531,7 @@ async def cek_sekali(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hasil = await cek_resi(courier, resi, api_key=get_active_api_key())
 
     if not hasil["success"]:
-        await selesai_animasi(msg, task, hasil["status"])
+        await selesai_animasi(msg, task, teks_error_resi(courier, resi, hasil["status"]))
         return
 
     kartu = buat_kartu_hasil(resi, None, hasil, disimpan=False)
@@ -348,8 +539,9 @@ async def cek_sekali(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, task = await animasi_loading(update.message)
-    teks = await bangun_teks_status_detail(update.effective_chat.id)
-    await selesai_animasi(msg, task, teks, reply_markup=status_list_keyboard())
+    teks, hasil_semua = await bangun_status_detail(update.effective_chat.id)
+    keyboard = status_list_keyboard(hasil_semua) if hasil_semua else main_menu_keyboard()
+    await selesai_animasi(msg, task, teks, reply_markup=keyboard)
 
 async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -401,7 +593,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     waktu_sekarang = datetime.now().strftime("%H:%M:%S")
 
     teks = (
-        "🏓 *Pong!*\n\n"
+        "*Pong!*\n\n"
         f"Waktu server: `{waktu_sekarang} WIB`\n"
         f"Latensi bot: `{latency_ms:.0f} ms`\n"
         f"Uptime: `{uptime}`\n\n"
@@ -414,7 +606,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(teks, parse_mode="Markdown")
 
 
-# ---------- Inline button callback (edit pesan, bukan kirim baru) ----------
+# ---------- Inline button callback ----------
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -422,25 +614,63 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "menu":
-        await query.message.edit_text(teks_start(), parse_mode="Markdown", reply_markup=main_menu_keyboard())
+        await query.message.edit_text(
+            teks_start_v2(update), parse_mode="MarkdownV2", reply_markup=main_menu_keyboard()
+        )
 
     elif data == "status":
         msg, task = await animasi_loading_edit(query.message)
-        teks = await bangun_teks_status_detail(update.effective_chat.id)
-        await selesai_animasi(msg, task, teks, reply_markup=status_list_keyboard())
+        teks, hasil_semua = await bangun_status_detail(update.effective_chat.id)
+        keyboard = status_list_keyboard(hasil_semua) if hasil_semua else main_menu_keyboard()
+        await selesai_animasi(msg, task, teks, reply_markup=keyboard)
 
     elif data == "kurir":
         await query.message.edit_text(teks_kurir(), parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
-    elif data == "help":
-        await query.message.edit_text(teks_help(), parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    elif data == "help_menu":
+        await query.message.edit_text(teks_help_menu(), parse_mode="Markdown", reply_markup=help_menu_keyboard())
+
+    elif data == "help_track":
+        await query.message.edit_text(teks_help_track(), parse_mode="Markdown", reply_markup=kembali_help_keyboard())
+
+    elif data == "help_cek":
+        await query.message.edit_text(teks_help_cek(), parse_mode="Markdown", reply_markup=kembali_help_keyboard())
+
+    elif data == "help_map":
+        await query.message.edit_text(teks_help_map(), parse_mode="Markdown", reply_markup=kembali_help_keyboard())
+
+    elif data == "help_untrack":
+        await query.message.edit_text(teks_help_untrack(), parse_mode="Markdown", reply_markup=kembali_help_keyboard())
+
+    elif data == "stop_menu":
+        rows = get_all_resi(update.effective_chat.id)
+        if not rows:
+            await query.message.edit_text(
+                "Belum ada paket yang bisa dihentikan pemantauannya.",
+                parse_mode="Markdown", reply_markup=main_menu_keyboard()
+            )
+            return
+        await query.message.edit_text(
+            "*Pilih paket yang mau dihentikan pemantauannya:*",
+            parse_mode="Markdown", reply_markup=stop_menu_keyboard(rows)
+        )
+
+    elif data.startswith("confirm_untrack:"):
+        resi = data.split(":", 1)[1]
+        ok = remove_resi(update.effective_chat.id, resi)
+        rows = get_all_resi(update.effective_chat.id)
+        teks = f"Paket dengan resi `{resi}` sudah dihentikan pemantauannya." if ok else "Resi tidak ditemukan."
+        if rows:
+            await query.message.edit_text(teks, parse_mode="Markdown", reply_markup=stop_menu_keyboard(rows))
+        else:
+            await query.message.edit_text(teks, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
     elif data.startswith("refresh:"):
         _, courier, resi = data.split(":", 2)
         msg, task = await animasi_loading_edit(query.message)
         hasil = await cek_resi(courier, resi, api_key=get_active_api_key())
         if not hasil["success"]:
-            await selesai_animasi(msg, task, f"Gagal: {hasil['status']}")
+            await selesai_animasi(msg, task, teks_error_resi(courier, resi, hasil["status"]))
             return
         rows = get_all_resi(update.effective_chat.id)
         match = next((r for r in rows if r[3] == resi), None)
@@ -452,14 +682,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("map:"):
         resi = data.split(":", 1)[1]
-        await query.message.reply_text("📍 Mengirim lokasi checkpoint terakhir...")
+        await query.message.reply_text("Mengirim lokasi checkpoint terakhir...")
         await kirim_map_pin(query.message, resi, update.effective_chat.id)
 
     elif data.startswith("untrack:"):
         resi = data.split(":", 1)[1]
         ok = remove_resi(update.effective_chat.id, resi)
-        teks = "🗑️ Paket dihapus dari pantauan." if ok else "Resi tidak ditemukan."
-        await query.message.edit_text(teks, parse_mode="Markdown")
+        teks = "Paket dihapus dari pantauan." if ok else "Resi tidak ditemukan."
+        await query.message.edit_text(teks, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+    elif data.startswith("delpkg:"):
+        resi = data.split(":", 1)[1]
+        remove_resi(update.effective_chat.id, resi)
+        msg, task = await animasi_loading_edit(query.message)
+        teks, hasil_semua = await bangun_status_detail(update.effective_chat.id)
+        keyboard = status_list_keyboard(hasil_semua) if hasil_semua else main_menu_keyboard()
+        await selesai_animasi(msg, task, teks, reply_markup=keyboard)
 
 
 # ---------- Job berkala ----------
@@ -478,18 +716,26 @@ async def cek_berkala(context: ContextTypes.DEFAULT_TYPE):
         status_baru = hasil["status"]
         if status_baru != last_status:
             update_status(row_id, status_baru)
+            d = hasil["detail"]
             emoji = status_emoji(status_baru)
-            waktu = datetime.now().strftime("%H:%M WIB")
+            tanggal = format_tanggal_wib(d["last_date"])
+            teks_riwayat = format_history_wib(hasil["history"], max_items=3)
+
+            teks = (
+                f"{emoji} *Update status paket*\n\n"
+                f"*{label or resi}*\n"
+                f"Kurir: {d['courier_name']}"
+                + (f" · _{d['service']}_" if d.get('service') and d['service'] != '-' else "")
+                + f"\nResi: `{resi}`\n\n"
+                f"Status sebelumnya: _{last_status or 'Belum ada data'}_\n"
+                f"Status terbaru: *{status_baru}*\n\n"
+                f"_{d['last_desc']}_\n"
+                f"Waktu update: `{tanggal}`\n\n"
+                f"*Riwayat terbaru*\n{teks_riwayat}\n\n"
+                "Bot akan terus memantau paket ini dan mengirim kabar begitu ada perubahan berikutnya."
+            )
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        f"🔔 *Update paket* · `{waktu}`\n"
-                        f"{emoji} {label or resi} ({courier.upper()})\n"
-                        f"Status baru: *{status_baru}*"
-                    ),
-                    parse_mode="Markdown"
-                )
+                await context.bot.send_message(chat_id=chat_id, text=teks, parse_mode="Markdown")
             except Exception as e:
                 logger.error(f"Gagal kirim notifikasi ke {chat_id}: {e}")
 
